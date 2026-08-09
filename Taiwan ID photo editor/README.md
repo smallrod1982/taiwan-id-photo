@@ -17,19 +17,28 @@
 
 使用開源套件 [@imgly/background-removal](https://github.com/imgly/background-removal-js)，透過 CDN 在使用者瀏覽器內以 WebAssembly 執行 AI 模型，完全免費、無使用次數限制。第一次使用時瀏覽器需要下載模型檔案（幾 MB～數十 MB，依「快速／高品質」模式而定），下載後瀏覽器會快取。
 
-### 2. Gemini API（更精準，需要自己部署 + 申請金鑰）
+### 2. Gemini API（更精準，需要申請金鑰）
 
 **這個模式的設計重點：Gemini 只負責畫出「哪裡是人、哪裡是背景」的遮罩（黑白分割線），完全不會去重新產生或修改照片內容。實際輸出的每一個像素都是直接從你原始拍的照片複製過去的，AI 不會「重畫」臉，所以臉部、膚色、五官不可能被 AI 改動——這跟本機模式是同一種安全設計，只是遮罩換成 Gemini 來判斷，通常對頭髮絲、複雜背景的邊緣會判斷得更準。**
 
-要用這個模式，需要三個步驟：
+要用這個模式，網站必須部署在 **Cloudflare Pages**（因為需要 `functions/` 資料夾支援的後端函式），部署完成後有兩種方式可以設定金鑰，擇一即可：
+
+#### A. 網頁上直接設定（推薦，不用碰 Cloudflare 後台）
 
 1. 到 https://aistudio.google.com/apikey 免費申請一組 Gemini API Key（Google 帳號即可申請，有免費額度，個人使用通常足夠；用量大才會產生費用，收費標準請直接查 Gemini API 官方定價頁面）。
-2. 用「方法一：Cloudflare Pages」部署整個資料夾（**必須包含 `functions/api/segment.js` 這個檔案**，Cloudflare Pages 會自動把 `functions/` 資料夾底下的檔案變成後端 API，不需要額外設定伺服器）〃
-3. 部署完成後，到 Cloudflare Pages 專案 → **Settings → Environment variables**，新增一個名為 `GEMINI_API_KEY` 的變數，型別選 **Secret**，值貼上你的金鑰，存檔後重新部署一次（Redeploy）讓變數生效。
+2. 在網站畫面「去背引擎」選 **Gemini API**，貼上金鑰後按「儲存並讀取模型」。
+3. 儲存成功後會自動讀出這組金鑰目前可用的模型清單，下拉選單選你要用的模型即可（預設為 `gemini-3.6-flash`）。
 
-設定完成後，畫面上「去背引擎」選 Gemini API 即可使用；金鑰只存在 Cloudflare 後台，不會出現在瀏覽器或網頁原始碼裡。
+金鑰只會存在**你自己瀏覽器的 localStorage**（不會同步到其他裝置、也不會傳給 Anthropic 或任何第三方），每次去背時才會連同這次請求送到你自己部署的 `/api/segment`，再由這支後端函式轉送給 Google；金鑰不會出現在網頁原始碼或公開的網路流量分析工具裡，但仍會經過你自己這台裝置送出，所以請不要在公用電腦上儲存金鑰，且同一台裝置、同一個瀏覽器每次都需要各自設定一次。
 
-> 這個模式只有部署在 **Cloudflare Pages** 才能直接運作，因為需要 `functions/` 資料夾支援的後端函式。如果部署在 GitHub Pages 或 Netlify Drop（純靜態），畫面上選 Gemini API 去背會顯示連線失敗的錯誤訊息，此時改選「本機瀏覽器 AI」即可正常使用。
+#### B. 部署端統一設定（適合多人共用同一個部署、不想讓每個人各自輸入金鑰）
+
+1. 同上，先申請一組 Gemini API Key。
+2. 到 Cloudflare Pages 專案 → **Settings → Environment variables**，新增一個名為 `GEMINI_API_KEY` 的變數，型別選 **Secret**，值貼上你的金鑰，存檔後重新部署一次（Redeploy）讓變數生效。
+
+設定成 Secret 後，畫面上「去背引擎」選 Gemini API、且使用者沒有在畫面上另外輸入金鑰時，會自動使用這組伺服器端金鑰；金鑰只存在 Cloudflare 後台，不會出現在瀏覽器或網頁原始碼裡，但所有使用這個網址的人都會共用同一組金鑰額度。如果畫面上有輸入金鑰，會優先使用畫面上輸入的金鑰。
+
+> 如果部署在 GitHub Pages 或 Netlify Drop（純靜態），因為沒有後端函式可用，畫面上選 Gemini API 去背會顯示連線失敗的錯誤訊息，此時改選「本機瀏覽器 AI」即可正常使用。
 
 ## 本機測試
 
@@ -66,4 +75,4 @@ python3 -m http.server 8000
 
 - 尺寸與頭部對齊虛線框已依台灣官方公告（內政部戶政司國民身分證相片規格、外交部領事事務局晶片護照相片規格）設定頭長 3.2〜3.6cm、臉部占比 70%〜80% 等數字，但這個工具沒有做嚴格的自動法規驗證（例如沒有真的偵測五官位置），排版與尺寸僅供對齊參考，正式證件申請前請自行核對受理單位最新規定。
 - 磨皮效果是簡化版（整體柔化＋原圖疊加），效果比專業修圖 App 陽春，之後可以再優化。
-- Gemini 模型名稱寫在 `functions/api/segment.js` 最上面的 `GEMINI_MODEL` 常數，如果之後 Google 更新了更新的模型，改這一行即可。
+- Gemini 模型可以直接在網頁「Gemini 模型」下拉選單選擇；如果沒有在網頁上讀取模型清單（例如走方法 B 純伺服器端金鑰、使用者沒有另外選模型），會使用 `functions/api/segment.js` 最上面的 `DEFAULT_GEMINI_MODEL` 常數（目前預設 `gemini-3.6-flash`），如果之後 Google 更新了更新的模型，改這一行即可。
