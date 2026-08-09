@@ -42,12 +42,7 @@ const BG_COLORS = [
 ];
 
 const MAX_SOURCE_DIM = 1400; // 送去去背前先縮圖，加快處理速度
-
-// Gemini API 金鑰／模型設定：只存在瀏覽器 localStorage，不會上傳到任何第三方，
-// 去背時才會連同這次請求送到你自己部署的 /api/segment，再由後端轉送給 Google。
-const GEMINI_KEY_STORAGE_KEY = "idphoto_gemini_api_key";
-const GEMINI_MODEL_STORAGE_KEY = "idphoto_gemini_model";
-const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
+const PREVIEW_MAX_DIM = 560; // 修圖預覽用的縮圖上限（讓滑桿即時反應更順）
 
 // ---------- 全域狀態 ----------
 
@@ -60,12 +55,8 @@ const state = {
   selectedColor: BG_COLORS[0].value,
   selectedSize: SIZE_PRESETS[0],
   quality: "fast",
-  engine: "local", // "local"（瀏覽器內WASM模型，免費）或 "gemini"（呼叫 /api/segment，需自行部署+API金鑰）
-  geminiApiKey: "", // 從 localStorage 讀取，只存在瀏覽器
-  geminiModel: DEFAULT_GEMINI_MODEL,
-  geminiModelsLoaded: false,
   crop: { offsetX: 0, offsetY: 0, scale: 1 }, // 相對於 processedCanvas 的裁切狀態
-  adjust: { brightness: 0, contrast: 0, smooth: 0 },
+  adjust: { brightness: 0, contrast: 0, smooth: 0, whiten: 0, rosy: 0, sharpen: 0 },
   finalCanvas: null, // 最終單張證件照 canvas（已套用裁切+修圖，尺寸=目標mm@300dpi）
   selectedPaper: PAPER_PRESETS[0],
 };
@@ -109,22 +100,13 @@ function loadImage(src) {
   });
 }
 
-// ---------- localStorage 小工具（僅用於 Gemini 金鑰/模型，不含照片資料） ----------
-
-function loadFromLocalStorage(key, fallback) {
-  try {
-    const v = window.localStorage.getItem(key);
-    return v == null ? fallback : v;
-  } catch (err) {
-    return fallback; // 無痕模式或瀏覽器封鎖 localStorage 時，靜默退回預設值
-  }
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
 }
-function saveToLocalStorage(key, value) {
-  try {
-    window.localStorage.setItem(key, value);
-  } catch (err) {
-    // 忽略（例如無痕模式），不影響其餘功能
-  }
+
+function smoothstep(edge0, edge1, x) {
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 // ---------- Step 導覽 ----------
@@ -326,134 +308,7 @@ function initSizeAndColor() {
     })
   );
 
-  $$('input[name="engine"]').forEach((r) =>
-    r.addEventListener("change", (e) => {
-      state.engine = e.target.value;
-      updateEngineHint();
-    })
-  );
-  updateEngineHint();
-  initGeminiSettings();
-
   $("#btnProcess").addEventListener("click", runBackgroundRemoval);
-}
-
-function updateEngineHint() {
-  const hint = $("#engineHint");
-  const localWrap = $("#localQualityWrap");
-  const geminiWrap = $("#geminiSettingsWrap");
-  if (!hint) return;
-  const isGemini = state.engine === "gemini";
-  localWrap.classList.toggle("hidden", isGemini);
-  if (geminiWrap) geminiWrap.classList.toggle("hidden", !isGemini);
-  hint.textContent = isGemini
-    ? "只用 Gemini 產生去背「遮罩」，實際照片像素完全來自你的原圖、不經 AI 重繪，臉部不會被改動。在下面貼上你的 Gemini API 金鑰即可使用，或由部署者在 Cloudflare Pages 後台統一設定。"
-    : "完全在你的手機/電腦瀏覽器內處理，不需要任何設定，免費、離線可用。";
-}
-
-// ---------- Gemini 金鑰／模型設定（存在瀏覽器 localStorage，畫面上直接設定） ----------
-
-function initGeminiSettings() {
-  const keyInput = $("#geminiApiKeyInput");
-  const saveBtn = $("#btnSaveGeminiKey");
-  const modelSelect = $("#geminiModelSelect");
-  if (!keyInput || !saveBtn || !modelSelect) return;
-
-  state.geminiApiKey = loadFromLocalStorage(GEMINI_KEY_STORAGE_KEY, "");
-  state.geminiModel = loadFromLocalStorage(GEMINI_MODEL_STORAGE_KEY, DEFAULT_GEMINI_MODEL);
-  keyInput.value = state.geminiApiKey;
-  populateGeminiModelSelect([], state.geminiModel); // 先用預設模型頂著，等讀清單成功後再替換
-
-  saveBtn.addEventListener("click", () => saveGeminiKeyAndLoadModels());
-  keyInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      saveGeminiKeyAndLoadModels();
-    }
-  });
-  modelSelect.addEventListener("change", () => {
-    state.geminiModel = modelSelect.value;
-    saveToLocalStorage(GEMINI_MODEL_STORAGE_KEY, state.geminiModel);
-  });
-
-  // 如果之前已經存過金鑰，一開始就自動讀取一次模型清單，不用使用者再按一次
-  if (state.geminiApiKey) {
-    saveGeminiKeyAndLoadModels({ silent: true });
-  }
-}
-
-function populateGeminiModelSelect(models, selected) {
-  const modelSelect = $("#geminiModelSelect");
-  const modelWrap = $("#geminiModelWrap");
-  if (!modelSelect) return;
-  modelSelect.innerHTML = "";
-
-  const list = models && models.length ? models : [{ id: selected || DEFAULT_GEMINI_MODEL, displayName: selected || DEFAULT_GEMINI_MODEL }];
-  list.forEach((m) => {
-    const opt = document.createElement("option");
-    opt.value = m.id;
-    opt.textContent = m.displayName || m.id;
-    modelSelect.appendChild(opt);
-  });
-
-  const want = selected || DEFAULT_GEMINI_MODEL;
-  if (list.some((m) => m.id === want)) {
-    modelSelect.value = want;
-  } else {
-    modelSelect.value = list[0].id;
-  }
-  state.geminiModel = modelSelect.value;
-  if (modelWrap) modelWrap.classList.toggle("hidden", !(models && models.length));
-}
-
-async function saveGeminiKeyAndLoadModels(opts) {
-  const silent = opts && opts.silent;
-  const keyInput = $("#geminiApiKeyInput");
-  const keyHint = $("#geminiKeyHint");
-  const saveBtn = $("#btnSaveGeminiKey");
-  if (!keyInput) return;
-
-  const apiKey = keyInput.value.trim();
-  state.geminiApiKey = apiKey;
-  saveToLocalStorage(GEMINI_KEY_STORAGE_KEY, apiKey);
-
-  if (!apiKey) {
-    populateGeminiModelSelect([], DEFAULT_GEMINI_MODEL);
-    if (keyHint) keyHint.textContent = "金鑰只會存在你自己的瀏覽器裡，不會分享給任何第三方，去背時才會連同這次請求送到你部署的後端再轉給 Google。";
-    return;
-  }
-
-  if (saveBtn) saveBtn.disabled = true;
-  if (keyHint) keyHint.textContent = "正在讀取可用的模型清單…";
-
-  try {
-    const res = await fetch("/api/models", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey }),
-    });
-    const data = await res.json().catch(() => null);
-    if (!res.ok) {
-      throw new Error((data && data.error) || `HTTP ${res.status}`);
-    }
-    const models = (data && data.models) || [];
-    if (!models.length) {
-      throw new Error("這組金鑰沒有找到可用的模型，請確認金鑰正確。");
-    }
-    populateGeminiModelSelect(models, state.geminiModel || DEFAULT_GEMINI_MODEL);
-    saveToLocalStorage(GEMINI_MODEL_STORAGE_KEY, state.geminiModel);
-    state.geminiModelsLoaded = true;
-    if (keyHint) keyHint.textContent = `已儲存金鑰，共讀到 ${models.length} 個可用模型，請在下面選擇要使用的模型。`;
-  } catch (err) {
-    populateGeminiModelSelect([], state.geminiModel || DEFAULT_GEMINI_MODEL);
-    if (keyHint) {
-      keyHint.textContent = silent
-        ? "金鑰已還原，但目前讀取模型清單失敗，請確認網路連線或金鑰是否正確：" + (err && err.message ? err.message : String(err))
-        : "讀取模型清單失敗：" + (err && err.message ? err.message : String(err));
-    }
-  } finally {
-    if (saveBtn) saveBtn.disabled = false;
-  }
 }
 
 // 依序嘗試多個 CDN 來源，任何一個能載入即可（增加離線/網路狀況不佳時的成功率）
@@ -485,118 +340,25 @@ async function loadBgRemovalModule() {
   return bgRemovalModulePromise;
 }
 
-// ---------- Gemini API 去背（呼叫自架的 /api/segment，只取「遮罩」，像素完全來自原圖） ----------
-
-async function runGeminiSegmentation(srcCanvas) {
-  const blob = await canvasToBlob(srcCanvas, "image/jpeg", 0.92);
-  const form = new FormData();
-  form.append("image", blob, "photo.jpg");
-  if (state.geminiApiKey) form.append("apiKey", state.geminiApiKey);
-  if (state.geminiModel) form.append("model", state.geminiModel);
-
-  let res;
-  try {
-    res = await fetch("/api/segment", { method: "POST", body: form });
-  } catch (err) {
-    throw new Error(
-      "無法連線到 /api/segment，請確認已經把 functions/api/segment.js 跟著網站一起部署到 Cloudflare Pages。"
-    );
-  }
-  if (!res.ok) {
-    const contentType = res.headers.get("content-type") || "";
-    let msg = "";
-    if (contentType.includes("application/json")) {
-      try {
-        msg = (await res.json()).error || "";
-      } catch (_) {
-        msg = "";
-      }
-    }
-    if (!msg) {
-      // 非 JSON 回應（例如 404/501 或其他錯誤頁）通常代表這個環境根本沒有 /api/segment 這個後端函式
-      throw new Error(
-        `找不到可用的 /api/segment（HTTP ${res.status}）。這通常代表目前的部署環境不支援後端函式（例如純靜態的 GitHub Pages / Netlify Drop，或本機測試伺服器），請改用「本機瀏覽器 AI」，或依 README 部署到 Cloudflare Pages 並設定 GEMINI_API_KEY。`
-      );
-    }
-    throw new Error(`Gemini 去背服務錯誤（HTTP ${res.status}）：${msg}`);
-  }
-  const data = await res.json();
-  if (!data || !data.box_2d || !data.mask) {
-    throw new Error("Gemini 沒有辨識出人像遮罩，請換一張正面、背景單純、光線充足的照片再試一次。");
-  }
-  return buildCutoutFromMask(srcCanvas, data.box_2d, data.mask);
-}
-
-// 用 Gemini 回傳的分割遮罩，去裁切「原始未經修改」的像素：
-// 只有透明度（要保留/去除哪些區域）來自 AI，顏色/五官等實際像素值 100% 來自使用者原圖，
-// 不會有任何 AI 重繪，因此臉部絕對不會被改動。
-async function buildCutoutFromMask(srcCanvas, box_2d, maskDataUrl) {
-  const W = srcCanvas.width;
-  const H = srcCanvas.height;
-  const maskImg = await loadImage(maskDataUrl);
-
-  const [y0n, x0n, y1n, x1n] = box_2d;
-  const x0 = clamp(Math.round((x0n / 1000) * W), 0, W);
-  const y0 = clamp(Math.round((y0n / 1000) * H), 0, H);
-  const x1 = clamp(Math.round((x1n / 1000) * W), 0, W);
-  const y1 = clamp(Math.round((y1n / 1000) * H), 0, H);
-  const boxW = Math.max(1, x1 - x0);
-  const boxH = Math.max(1, y1 - y0);
-
-  const maskFull = document.createElement("canvas");
-  maskFull.width = W;
-  maskFull.height = H;
-  const mctx = maskFull.getContext("2d");
-  mctx.drawImage(maskImg, x0, y0, boxW, boxH);
-
-  // Gemini 回傳的遮罩是灰階圖，灰階亮度＝該像素的保留程度，這裡把亮度轉成 alpha 透明度
-  const imgData = mctx.getImageData(0, 0, W, H);
-  const d = imgData.data;
-  for (let i = 0; i < d.length; i += 4) {
-    d[i + 3] = d[i]; // alpha = R 通道亮度
-  }
-  mctx.putImageData(imgData, 0, 0);
-
-  const cutout = document.createElement("canvas");
-  cutout.width = W;
-  cutout.height = H;
-  const cctx = cutout.getContext("2d");
-  cctx.drawImage(srcCanvas, 0, 0); // 完整保留原圖像素，未經任何 AI 重繪
-  cctx.globalCompositeOperation = "destination-in";
-  cctx.drawImage(maskFull, 0, 0);
-  cctx.globalCompositeOperation = "source-over";
-  return cutout;
-}
-
 async function runBackgroundRemoval() {
   if (!state.sourceCanvas) return;
   $("#processHint").textContent = "";
-  showOverlay(
-    state.engine === "gemini"
-      ? "正在呼叫 Gemini 產生去背遮罩，請稍候…"
-      : "正在下載並執行 AI 去背模型，第一次使用可能需要 10~30 秒…"
-  );
+  showOverlay("正在下載並執行 AI 去背模型，第一次使用可能需要 10~30 秒…");
   try {
-    let cutoutCanvas;
-
-    if (state.engine === "gemini") {
-      cutoutCanvas = await runGeminiSegmentation(state.sourceCanvas);
-    } else {
-      const mod = await loadBgRemovalModule();
-      const removeBackground = mod.default || mod.removeBackground;
-      const srcBlob = await canvasToBlob(state.sourceCanvas, "image/png");
-      const cutoutBlob = await removeBackground(srcBlob, {
-        model: state.quality === "fast" ? "isnet_quant8" : "isnet_fp16",
-        output: { format: "image/png", quality: 1, type: "foreground" },
-      });
-      const cutoutUrl = URL.createObjectURL(cutoutBlob);
-      const cutoutImg = await loadImage(cutoutUrl);
-      URL.revokeObjectURL(cutoutUrl);
-      cutoutCanvas = document.createElement("canvas");
-      cutoutCanvas.width = state.sourceCanvas.width;
-      cutoutCanvas.height = state.sourceCanvas.height;
-      cutoutCanvas.getContext("2d").drawImage(cutoutImg, 0, 0, cutoutCanvas.width, cutoutCanvas.height);
-    }
+    const mod = await loadBgRemovalModule();
+    const removeBackground = mod.default || mod.removeBackground;
+    const srcBlob = await canvasToBlob(state.sourceCanvas, "image/png");
+    const cutoutBlob = await removeBackground(srcBlob, {
+      model: state.quality === "fast" ? "isnet_quant8" : "isnet_fp16",
+      output: { format: "image/png", quality: 1, type: "foreground" },
+    });
+    const cutoutUrl = URL.createObjectURL(cutoutBlob);
+    const cutoutImg = await loadImage(cutoutUrl);
+    URL.revokeObjectURL(cutoutUrl);
+    const cutoutCanvas = document.createElement("canvas");
+    cutoutCanvas.width = state.sourceCanvas.width;
+    cutoutCanvas.height = state.sourceCanvas.height;
+    cutoutCanvas.getContext("2d").drawImage(cutoutImg, 0, 0, cutoutCanvas.width, cutoutCanvas.height);
 
     const canvas = document.createElement("canvas");
     canvas.width = state.sourceCanvas.width;
@@ -607,6 +369,7 @@ async function runBackgroundRemoval() {
     ctx.drawImage(cutoutCanvas, 0, 0);
 
     state.processedCanvas = canvas;
+    invalidateRetouchCaches();
     resetCropState();
     hideOverlay();
     goToStep(3);
@@ -624,7 +387,7 @@ async function runBackgroundRemoval() {
 
 function resetCropState() {
   state.crop = { offsetX: 0, offsetY: 0, scale: 1 };
-  state.adjust = { brightness: 0, contrast: 0, smooth: 0 };
+  state.adjust = { brightness: 0, contrast: 0, smooth: 0, whiten: 0, rosy: 0, sharpen: 0 };
 }
 
 function getTargetRatio() {
@@ -703,6 +466,7 @@ function initCropTool() {
     state.crop.scale = Number(e.target.value) / 100;
     renderCrop();
   });
+  // 修圖滑桿：拖曳時只重繪預覽（用縮圖 proxy，反應即時）
   $("#brightRange").addEventListener("input", (e) => {
     state.adjust.brightness = Number(e.target.value);
     renderCrop();
@@ -715,12 +479,27 @@ function initCropTool() {
     state.adjust.smooth = Number(e.target.value);
     renderCrop();
   });
+  $("#whitenRange").addEventListener("input", (e) => {
+    state.adjust.whiten = Number(e.target.value);
+    renderCrop();
+  });
+  $("#rosyRange").addEventListener("input", (e) => {
+    state.adjust.rosy = Number(e.target.value);
+    renderCrop();
+  });
+  $("#sharpenRange").addEventListener("input", (e) => {
+    state.adjust.sharpen = Number(e.target.value);
+    renderCrop();
+  });
   $("#btnResetAdjust").addEventListener("click", () => {
-    state.adjust = { brightness: 0, contrast: 0, smooth: 0 };
+    state.adjust = { brightness: 0, contrast: 0, smooth: 0, whiten: 0, rosy: 0, sharpen: 0 };
     state.crop = { offsetX: 0, offsetY: 0, scale: 1 };
     $("#brightRange").value = 0;
     $("#contrastRange").value = 0;
     $("#smoothRange").value = 0;
+    $("#whitenRange").value = 0;
+    $("#rosyRange").value = 0;
+    $("#sharpenRange").value = 0;
     $("#zoomRange").value = 100;
     renderCrop();
   });
@@ -728,14 +507,222 @@ function initCropTool() {
   $("#btnConfirmCrop").addEventListener("click", confirmCropAndProceed);
 }
 
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v));
+// ---------- 修圖引擎（像素級：智慧磨皮 / 美白 / 紅潤 / 亮度對比 / 銳化） ----------
+//
+// 設計參考「美圖秀秀」風格的美顏流程：
+// - 智慧磨皮：邊緣保留式柔膚（先做低頻模糊，再依「細節/邊緣強度」決定混合比例），
+//   平坦的皮膚會被柔化，眼睛、頭髮、嘴唇等高細節邊緣則保留清晰，不會整臉變模糊。
+// - 美白 / 紅潤：用膚色遮罩（YCbCr）只作用在皮膚上，不會把背景或頭髮染色。
+// - 銳化：最後用 unsharp mask 讓五官恢復銳利。
+// 所有效果都在瀏覽器端對像素運算，照片不會上傳。
+
+// 單通道可分離 box blur（水平＋垂直，滑動視窗），邊界以複製邊緣處理
+function boxBlurChannel(src, w, h, r) {
+  if (r < 1) {
+    const copy = new Float32Array(src.length);
+    copy.set(src);
+    return copy;
+  }
+  const win = r * 2 + 1;
+  const tmp = new Float32Array(w * h);
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    let sum = 0;
+    for (let k = -r; k <= r; k++) sum += src[row + clamp(k, 0, w - 1)];
+    tmp[row] = sum / win;
+    for (let x = 1; x < w; x++) {
+      sum += src[row + clamp(x + r, 0, w - 1)] - src[row + clamp(x - r - 1, 0, w - 1)];
+      tmp[row + x] = sum / win;
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let sum = 0;
+    for (let k = -r; k <= r; k++) sum += tmp[clamp(k, 0, h - 1) * w + x];
+    out[x] = sum / win;
+    for (let y = 1; y < h; y++) {
+      sum += tmp[clamp(y + r, 0, h - 1) * w + x] - tmp[clamp(y - r - 1, 0, h - 1) * w + x];
+      out[y * w + x] = sum / win;
+    }
+  }
+  return out;
 }
 
-function buildFilterString() {
-  const b = 100 + state.adjust.brightness; // %
-  const c = 100 + state.adjust.contrast; // %
-  return `brightness(${b}%) contrast(${c}%)`;
+function applyRetouch(srcCanvas) {
+  const w = srcCanvas.width;
+  const h = srcCanvas.height;
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const octx = out.getContext("2d");
+  octx.drawImage(srcCanvas, 0, 0);
+
+  const a = state.adjust;
+  const smooth = (a.smooth || 0) / 100;
+  const whiten = (a.whiten || 0) / 100;
+  const rosy = (a.rosy || 0) / 100;
+  const sharpen = (a.sharpen || 0) / 100;
+  const bright = a.brightness || 0;
+  const contrast = a.contrast || 0;
+  if (!smooth && !whiten && !rosy && !sharpen && !bright && !contrast) return out;
+
+  const imgData = octx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+  const n = w * h;
+  const R = new Float32Array(n);
+  const G = new Float32Array(n);
+  const B = new Float32Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    R[i] = data[p];
+    G[i] = data[p + 1];
+    B[i] = data[p + 2];
+  }
+  const minDim = Math.min(w, h);
+
+  // 工作緩衝（後續就地修改）
+  let WR = R;
+  let WG = G;
+  let WB = B;
+
+  // 1) 智慧磨皮：邊緣保留式柔膚
+  if (smooth > 0) {
+    const r = Math.max(1, Math.round(minDim * 0.012));
+    let bR = boxBlurChannel(R, w, h, r);
+    bR = boxBlurChannel(bR, w, h, r);
+    let bG = boxBlurChannel(G, w, h, r);
+    bG = boxBlurChannel(bG, w, h, r);
+    let bB = boxBlurChannel(B, w, h, r);
+    bB = boxBlurChannel(bB, w, h, r);
+    // 亮度細節 detail 小＝皮膚紋理/毛孔/斑點（要柔化）；大＝五官/頭髮邊緣（要保留）。
+    // 用 smoothstep 從 EDGE_LO 到 EDGE_HI 過渡：低於 LO 幾乎全柔化，高於 HI 幾乎全保留。
+    const EDGE_LO = 16;
+    const EDGE_HI = 52;
+    const nR = new Float32Array(n);
+    const nG = new Float32Array(n);
+    const nB = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const lo = 0.299 * R[i] + 0.587 * G[i] + 0.114 * B[i];
+      const lb = 0.299 * bR[i] + 0.587 * bG[i] + 0.114 * bB[i];
+      const detail = Math.abs(lo - lb);
+      const edge = smoothstep(EDGE_LO, EDGE_HI, detail); // 0..1，越大越像邊緣
+      const blend = smooth * (1 - edge) * 0.9; // 平坦皮膚才大幅柔化
+      nR[i] = R[i] + (bR[i] - R[i]) * blend;
+      nG[i] = G[i] + (bG[i] - G[i]) * blend;
+      nB[i] = B[i] + (bB[i] - B[i]) * blend;
+    }
+    WR = nR;
+    WG = nG;
+    WB = nB;
+  }
+
+  // 2) 美白 / 紅潤：只作用在膚色像素（YCbCr 軟遮罩）
+  if (whiten > 0 || rosy > 0) {
+    for (let i = 0; i < n; i++) {
+      const r0 = WR[i];
+      const g0 = WG[i];
+      const b0 = WB[i];
+      const Y = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
+      const Cb = -0.168736 * r0 - 0.331264 * g0 + 0.5 * b0 + 128;
+      const Cr = 0.5 * r0 - 0.418688 * g0 - 0.081312 * b0 + 128;
+      const sCr = smoothstep(133, 150, Cr) * (1 - smoothstep(173, 188, Cr));
+      const sCb = smoothstep(77, 90, Cb) * (1 - smoothstep(127, 140, Cb));
+      const sY = smoothstep(35, 60, Y);
+      const skin = sCr * sCb * sY;
+      if (skin <= 0) continue;
+      if (whiten > 0) {
+        const amt = whiten * skin * 0.5; // 提亮膚色（往白色柔和拉）
+        WR[i] = r0 + (255 - r0) * amt;
+        WG[i] = WG[i] + (255 - WG[i]) * amt;
+        WB[i] = WB[i] + (255 - WB[i]) * amt;
+      }
+      if (rosy > 0) {
+        const amt = rosy * skin; // 增加暖色調氣色
+        WR[i] = WR[i] + amt * 20;
+        WG[i] = WG[i] + amt * 4;
+        WB[i] = WB[i] - amt * 8;
+      }
+    }
+  }
+
+  // 3) 亮度 / 對比（全域）
+  if (bright !== 0 || contrast !== 0) {
+    const bf = (100 + bright) / 100;
+    const cf = (100 + contrast) / 100;
+    for (let i = 0; i < n; i++) {
+      WR[i] = (WR[i] * bf - 128) * cf + 128;
+      WG[i] = (WG[i] * bf - 128) * cf + 128;
+      WB[i] = (WB[i] * bf - 128) * cf + 128;
+    }
+  }
+
+  // 4) 銳化（unsharp mask，全域，最後做，讓五官恢復銳利）
+  if (sharpen > 0) {
+    const rs = Math.max(1, Math.round(minDim * 0.004));
+    const sbR = boxBlurChannel(WR, w, h, rs);
+    const sbG = boxBlurChannel(WG, w, h, rs);
+    const sbB = boxBlurChannel(WB, w, h, rs);
+    const amt = sharpen * 1.1;
+    for (let i = 0; i < n; i++) {
+      WR[i] = WR[i] + (WR[i] - sbR[i]) * amt;
+      WG[i] = WG[i] + (WG[i] - sbG[i]) * amt;
+      WB[i] = WB[i] + (WB[i] - sbB[i]) * amt;
+    }
+  }
+
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    data[p] = clamp(Math.round(WR[i]), 0, 255);
+    data[p + 1] = clamp(Math.round(WG[i]), 0, 255);
+    data[p + 2] = clamp(Math.round(WB[i]), 0, 255);
+    // alpha 不變（去背後已套底色，整張不透明）
+  }
+  octx.putImageData(imgData, 0, 0);
+  return out;
+}
+
+// 修圖結果快取：預覽用縮圖 proxy（滑桿即時），輸出用全解析度
+let _proxyBase = null;
+let _previewCache = { sig: null, canvas: null };
+let _fullCache = { sig: null, canvas: null };
+
+function invalidateRetouchCaches() {
+  _proxyBase = null;
+  _previewCache = { sig: null, canvas: null };
+  _fullCache = { sig: null, canvas: null };
+}
+
+function adjustSig() {
+  const a = state.adjust;
+  return [a.brightness, a.contrast, a.smooth, a.whiten, a.rosy, a.sharpen].join(",");
+}
+
+function getProxyBase() {
+  if (_proxyBase) return _proxyBase;
+  const src = state.processedCanvas;
+  const sc = Math.min(1, PREVIEW_MAX_DIM / Math.max(src.width, src.height));
+  const w = Math.max(1, Math.round(src.width * sc));
+  const h = Math.max(1, Math.round(src.height * sc));
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  c.getContext("2d").drawImage(src, 0, 0, w, h);
+  _proxyBase = c;
+  return c;
+}
+
+function getPreviewRetouched() {
+  const sig = adjustSig();
+  if (_previewCache.sig === sig && _previewCache.canvas) return _previewCache.canvas;
+  const c = applyRetouch(getProxyBase());
+  _previewCache = { sig, canvas: c };
+  return c;
+}
+
+function getFullRetouched() {
+  const sig = adjustSig();
+  if (_fullCache.sig === sig && _fullCache.canvas) return _fullCache.canvas;
+  const c = applyRetouch(state.processedCanvas);
+  _fullCache = { sig, canvas: c };
+  return c;
 }
 
 // 繪製裁切預覽：裁切框永遠是正方形容器，內容依目標比例置中顯示
@@ -760,36 +747,25 @@ function renderCrop() {
   const frameX = (size - frameW) / 2;
   const frameY = (size - frameH) / 2;
 
-  const src = state.processedCanvas;
-  if (!src) return;
+  if (!state.processedCanvas) return;
+  const src = getPreviewRetouched(); // 已套用修圖的縮圖
 
   ctx.save();
   ctx.beginPath();
   ctx.rect(frameX, frameY, frameW, frameH);
   ctx.clip();
-  ctx.filter = buildFilterString();
 
-  const baseScale = Math.max(frameW / src.width, frameH / src.height);
-  const scale = baseScale * state.crop.scale;
-  const drawW = src.width * scale;
-  const drawH = src.height * scale;
-  // 中心點 = 框中心 + 使用者拖曳位移（畫面座標，像素對像素）
+  // drawW/drawH 只取決於框大小與縮放，與 src 解析度無關（proxy 與全圖比例相同）
+  const scale = state.crop.scale;
+  const drawW = frameW * scale;
+  const drawH = (frameW / (src.width / src.height)) * scale;
   const centerX = frameX + frameW / 2 + state.crop.offsetX;
   const centerY = frameY + frameH / 2 + state.crop.offsetY;
 
   ctx.drawImage(src, centerX - drawW / 2, centerY - drawH / 2, drawW, drawH);
-
-  // 磨皮：疊加一層模糊、降低不透明度做簡易柔膚效果
-  if (state.adjust.smooth > 0) {
-    ctx.filter = `blur(${(state.adjust.smooth / 100) * 4}px) ${buildFilterString()}`;
-    ctx.globalAlpha = clamp(state.adjust.smooth / 100, 0, 0.6);
-    ctx.drawImage(src, centerX - drawW / 2, centerY - drawH / 2, drawW, drawH);
-    ctx.globalAlpha = 1;
-  }
   ctx.restore();
 
   // 畫出框線
-  ctx.filter = "none";
   ctx.strokeStyle = "rgba(37,99,235,0.9)";
   ctx.lineWidth = 2;
   ctx.strokeRect(frameX, frameY, frameW, frameH);
@@ -797,8 +773,17 @@ function renderCrop() {
   // 畫出頭部對齊虛線參考框（僅為畫面上的對齊輔助，不會被存進最終輸出圖片）
   drawFaceGuide(ctx, frameX, frameY, frameW, frameH);
 
-  // 存下這次算好的框資訊，供輸出使用
-  renderCrop._lastFrame = { frameX, frameY, frameW, frameH, centerX, centerY, drawW, drawH, scale };
+  // 存下這次算好的框資訊（比例式，供輸出使用）
+  renderCrop._lastFrame = {
+    frameX,
+    frameY,
+    frameW,
+    frameH,
+    centerX,
+    centerY,
+    drawW,
+    drawH,
+  };
 }
 
 // 取得目前尺寸的官方頭長規定（mm），查無官方規定時回傳估算值僅供參考
@@ -906,23 +891,15 @@ function confirmCropAndProceed() {
   outCanvas.width = outW;
   outCanvas.height = outH;
   const ctx = outCanvas.getContext("2d");
-  ctx.filter = buildFilterString();
 
+  const retouched = getFullRetouched(); // 全解析度修圖結果
   const scaleToOut = outW / f.frameW;
   const drawW = f.drawW * scaleToOut;
   const drawH = f.drawH * scaleToOut;
   const centerX = (f.centerX - f.frameX) * scaleToOut;
   const centerY = (f.centerY - f.frameY) * scaleToOut;
 
-  ctx.drawImage(state.processedCanvas, centerX - drawW / 2, centerY - drawH / 2, drawW, drawH);
-
-  if (state.adjust.smooth > 0) {
-    ctx.filter = `blur(${(state.adjust.smooth / 100) * (4 * scaleToOut)}px) ${buildFilterString()}`;
-    ctx.globalAlpha = clamp(state.adjust.smooth / 100, 0, 0.6);
-    ctx.drawImage(state.processedCanvas, centerX - drawW / 2, centerY - drawH / 2, drawW, drawH);
-    ctx.globalAlpha = 1;
-  }
-  ctx.filter = "none";
+  ctx.drawImage(retouched, centerX - drawW / 2, centerY - drawH / 2, drawW, drawH);
 
   state.finalCanvas = outCanvas;
 
@@ -1047,10 +1024,14 @@ function resetAll() {
   state.processedCanvas = null;
   state.finalCanvas = null;
   state.crop = { offsetX: 0, offsetY: 0, scale: 1 };
-  state.adjust = { brightness: 0, contrast: 0, smooth: 0 };
+  state.adjust = { brightness: 0, contrast: 0, smooth: 0, whiten: 0, rosy: 0, sharpen: 0 };
+  invalidateRetouchCaches();
   $("#brightRange").value = 0;
   $("#contrastRange").value = 0;
   $("#smoothRange").value = 0;
+  $("#whitenRange").value = 0;
+  $("#rosyRange").value = 0;
+  $("#sharpenRange").value = 0;
   $("#zoomRange").value = 100;
   $("#btnDownloadLayout").hidden = true;
   $("#layoutHint").textContent = "";
@@ -1076,4 +1057,13 @@ function init() {
 init();
 
 // 供除錯/自動化測試使用，不影響一般使用（不會外洩任何照片資料到網路）
-window.__app = { state, goToStep, renderCrop, runBackgroundRemoval, confirmCropAndProceed, generateLayout };
+window.__app = {
+  state,
+  goToStep,
+  renderCrop,
+  runBackgroundRemoval,
+  confirmCropAndProceed,
+  generateLayout,
+  applyRetouch,
+  invalidateRetouchCaches,
+};
