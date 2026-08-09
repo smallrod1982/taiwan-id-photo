@@ -4,14 +4,17 @@
 // 重點：這支函式只回傳遮罩（哪些像素屬於人、哪些屬於背景），完全不回傳 Gemini 重新產生的圖片內容，
 // 實際照片像素永遠是使用者原圖，前端會用這個遮罩去裁切原圖，所以臉部、膚色、五官不會被 AI 改動。
 //
-// 部署方式：
-//   1. 把整個專案（含這個 functions/ 資料夾）上傳到 Cloudflare Pages。
-//   2. 到 Cloudflare Pages 專案 → Settings → Environment variables，新增一個
-//      名為 GEMINI_API_KEY 的「Secret」，值是你自己在 https://aistudio.google.com/apikey 申請的金鑰。
-//   3. 重新部署一次讓環境變數生效。前端就可以直接呼叫同網域的 /api/segment，金鑰不會外洩到瀏覽器。
+// 金鑰／模型來源（兩種方式擇一即可）：
+//   A) 網頁上直接設定（推薦，操作簡單）：在畫面「去背引擎」選 Gemini API 後，貼上金鑰按「儲存」，
+//      金鑰只會存在你自己瀏覽器的 localStorage，每次去背時才會連同這次請求一起送到這支函式，
+//      再由這支函式轉送給 Google，不會經過任何第三方伺服器。
+//   B) 部署端設定（適合多人共用同一個部署、不想讓每個使用者各自輸入金鑰）：
+//      到 Cloudflare Pages 專案 → Settings → Environment variables，新增一個
+//      名為 GEMINI_API_KEY 的「Secret」，重新部署一次讓環境變數生效；
+//      前端沒有另外輸入金鑰時，會自動使用這個伺服器端金鑰。
+// 若前端有傳 apiKey / model 欄位，優先使用前端傳來的值；否則退回使用伺服器端的環境變數與預設模型。
 
-const GEMINI_MODEL = "gemini-2.5-flash"; // 如果之後有更新的模型，改這裡就好
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"; // 找不到前端指定模型時的預設值
 
 const SEGMENT_PROMPT = `這張照片中有一位人物。請針對「這個人」（包含頭髮、耳朵、五官、脖子、肩膀，不含背景）給出精確的分割遮罩。
 規則：
@@ -25,17 +28,25 @@ box_2d 是正規化到 0-1000 的 [ymin, xmin, ymax, xmax]。`;
 export async function onRequestPost(context) {
   const { request, env } = context;
 
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return jsonError(500, "伺服器尚未設定 GEMINI_API_KEY，請到 Cloudflare Pages 專案設定加入這個環境變數（Secret）。");
-  }
-
   let form;
   try {
     form = await request.formData();
   } catch (err) {
     return jsonError(400, "請以 multipart/form-data 上傳照片（欄位名稱 image）。");
   }
+
+  const clientApiKey = (form.get("apiKey") || "").toString().trim();
+  const apiKey = clientApiKey || env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return jsonError(
+      500,
+      "尚未設定 Gemini API 金鑰：請在網頁「去背引擎」選 Gemini API 後直接貼上金鑰並儲存，或請部署者到 Cloudflare Pages 專案設定加入 GEMINI_API_KEY 這個環境變數（Secret）。"
+    );
+  }
+
+  const clientModel = (form.get("model") || "").toString().trim();
+  const model = clientModel || DEFAULT_GEMINI_MODEL;
+  const geminiEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
   const file = form.get("image");
   if (!file || typeof file.arrayBuffer !== "function") {
@@ -60,7 +71,7 @@ export async function onRequestPost(context) {
 
   let geminiRes;
   try {
-    geminiRes = await fetch(GEMINI_ENDPOINT, {
+    geminiRes = await fetch(geminiEndpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -74,7 +85,13 @@ export async function onRequestPost(context) {
 
   if (!geminiRes.ok) {
     const errText = await geminiRes.text().catch(() => "");
-    return jsonError(geminiRes.status, "Gemini API 回傳錯誤：" + errText.slice(0, 500));
+    const hint =
+      geminiRes.status === 400 || geminiRes.status === 404
+        ? "（請確認金鑰正確，或換一個模型再試一次）"
+        : geminiRes.status === 403
+        ? "（金鑰可能無效或沒有權限，請確認金鑰正確）"
+        : "";
+    return jsonError(geminiRes.status, `Gemini API 回傳錯誤${hint}：` + errText.slice(0, 500));
   }
 
   const geminiJson = await geminiRes.json().catch(() => null);
