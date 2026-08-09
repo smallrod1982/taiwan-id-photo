@@ -70,14 +70,25 @@
             <span>×</span>
             <input type="number" id="customH" placeholder="高 mm" min="10" max="200" />
           </div>
+          <p class="hint" id="sizeSpecHint"></p>
 
           <label class="field-label">底色</label>
           <div class="color-swatches" id="colorSwatches"></div>
+          <p class="hint" id="colorHint"></p>
 
-          <label class="field-label">去背模式</label>
+          <label class="field-label">去背引擎</label>
           <div class="radio-row">
-            <label><input type="radio" name="quality" value="fast" checked /> 快速（手機建議）</label>
-            <label><input type="radio" name="quality" value="high" /> 高品質（較慢）</label>
+            <label><input type="radio" name="engine" value="local" checked /> 本機瀏覽器 AI（免費）</label>
+            <label><input type="radio" name="engine" value="gemini" /> Gemini API（更精準，需自行部署）</label>
+          </div>
+          <p class="hint" id="engineHint"></p>
+
+          <div id="localQualityWrap">
+            <label class="field-label">去背模式</label>
+            <div class="radio-row">
+              <label><input type="radio" name="quality" value="fast" checked /> 快速（手機建議）</label>
+              <label><input type="radio" name="quality" value="high" /> 高品質（較慢）</label>
+            </div>
           </div>
 
           <button id="btnProcess" class="btn primary wide">✂️ 自動去背並套用底色</button>
@@ -97,6 +108,7 @@
           <div class="crop-wrap" id="cropWrap">
             <canvas id="cropCanvas"></canvas>
           </div>
+          <p class="hint" id="cropGuideHint">白色虛線＝頭部對齊參考框，讓頭頂、下巴對準虛線範圍即可。</p>
         </div>
         <div class="controls">
           <label class="field-label">縮放</label>
