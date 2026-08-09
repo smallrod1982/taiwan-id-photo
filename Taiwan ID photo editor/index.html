@@ -79,9 +79,23 @@
           <label class="field-label">去背引擎</label>
           <div class="radio-row">
             <label><input type="radio" name="engine" value="local" checked /> 本機瀏覽器 AI（免費）</label>
-            <label><input type="radio" name="engine" value="gemini" /> Gemini API（更精準，需自行部署）</label>
+            <label><input type="radio" name="engine" value="gemini" /> Gemini API（更精準）</label>
           </div>
           <p class="hint" id="engineHint"></p>
+
+          <div id="geminiSettingsWrap" class="hidden">
+            <label class="field-label">Gemini API 金鑰</label>
+            <div class="custom-size" id="geminiKeyRow">
+              <input type="password" id="geminiApiKeyInput" placeholder="貼上你的 Gemini API 金鑰" autocomplete="off" />
+              <button id="btnSaveGeminiKey" class="btn secondary" type="button">儲存並讀取模型</button>
+            </div>
+            <p class="hint" id="geminiKeyHint">金鑰只會存在你自己的瀏覽器裡，不會分享給任何第三方，去背時才會連同這次請求送到你部署的後端再轉給 Google。</p>
+
+            <div id="geminiModelWrap" class="hidden">
+              <label class="field-label">Gemini 模型</label>
+              <select id="geminiModelSelect" class="select"></select>
+            </div>
+          </div>
 
           <div id="localQualityWrap">
             <label class="field-label">去背模式</label>
