@@ -43,6 +43,12 @@ const BG_COLORS = [
 
 const MAX_SOURCE_DIM = 1400; // 送去去背前先縮圖，加快處理速度
 
+// Gemini API 金鑰／模型設定：只存在瀏覽器 localStorage，不會上傳到任何第三方，
+// 去背時才會連同這次請求送到你自己部署的 /api/segment，再由後端轉送給 Google。
+const GEMINI_KEY_STORAGE_KEY = "idphoto_gemini_api_key";
+const GEMINI_MODEL_STORAGE_KEY = "idphoto_gemini_model";
+const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
+
 // ---------- 全域狀態 ----------
 
 const state = {
@@ -55,7 +61,10 @@ const state = {
   selectedSize: SIZE_PRESETS[0],
   quality: "fast",
   engine: "local", // "local"（瀏覽器內WASM模型，免費）或 "gemini"（呼叫 /api/segment，需自行部署+API金鑰）
-  crop": { offsetX: 0, offsetY: 0, scale: 1 }, // 相對於 processedCanvas 的裁切狀態
+  geminiApiKey: "", // 從 localStorage 讀取，只存在瀏覽器
+  geminiModel: DEFAULT_GEMINI_MODEL,
+  geminiModelsLoaded: false,
+  crop: { offsetX: 0, offsetY: 0, scale: 1 }, // 相對於 processedCanvas 的裁切狀態
   adjust: { brightness: 0, contrast: 0, smooth: 0 },
   finalCanvas: null, // 最終單張證件照 canvas（已套用裁切+修圖，尺寸=目標mm@300dpi）
   selectedPaper: PAPER_PRESETS[0],
@@ -98,6 +107,24 @@ function loadImage(src) {
     img.onerror = reject;
     img.src = src;
   });
+}
+
+// ---------- localStorage 小工具（僅用於 Gemini 金鑰/模型，不含照片資料） ----------
+
+function loadFromLocalStorage(key, fallback) {
+  try {
+    const v = window.localStorage.getItem(key);
+    return v == null ? fallback : v;
+  } catch (err) {
+    return fallback; // 無痕模式或瀏覽器封鎖 localStorage 時，靜默退回預設值
+  }
+}
+function saveToLocalStorage(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch (err) {
+    // 忽略（例如無痕模式），不影響其餘功能
+  }
 }
 
 // ---------- Step 導覽 ----------
@@ -306,6 +333,7 @@ function initSizeAndColor() {
     })
   );
   updateEngineHint();
+  initGeminiSettings();
 
   $("#btnProcess").addEventListener("click", runBackgroundRemoval);
 }
@@ -313,12 +341,119 @@ function initSizeAndColor() {
 function updateEngineHint() {
   const hint = $("#engineHint");
   const localWrap = $("#localQualityWrap");
+  const geminiWrap = $("#geminiSettingsWrap");
   if (!hint) return;
   const isGemini = state.engine === "gemini";
   localWrap.classList.toggle("hidden", isGemini);
+  if (geminiWrap) geminiWrap.classList.toggle("hidden", !isGemini);
   hint.textContent = isGemini
-    ? "會呼叫你自己部署的 /api/segment（Cloudflare Pages Function），只用 Gemini 產生去背「遮罩」，實際照片像素完全來自你的原圖、不經 AI 重繪，臉部不會被改動。需要先部署 functions/api/segment.js 並在後台設定 GEMINI_API_KEY，詳見 README。"
+    ? "只用 Gemini 產生去背「遮罩」，實際照片像素完全來自你的原圖、不經 AI 重繪，臉部不會被改動。在下面貼上你的 Gemini API 金鑰即可使用，或由部署者在 Cloudflare Pages 後台統一設定。"
     : "完全在你的手機/電腦瀏覽器內處理，不需要任何設定，免費、離線可用。";
+}
+
+// ---------- Gemini 金鑰／模型設定（存在瀏覽器 localStorage，畫面上直接設定） ----------
+
+function initGeminiSettings() {
+  const keyInput = $("#geminiApiKeyInput");
+  const saveBtn = $("#btnSaveGeminiKey");
+  const modelSelect = $("#geminiModelSelect");
+  if (!keyInput || !saveBtn || !modelSelect) return;
+
+  state.geminiApiKey = loadFromLocalStorage(GEMINI_KEY_STORAGE_KEY, "");
+  state.geminiModel = loadFromLocalStorage(GEMINI_MODEL_STORAGE_KEY, DEFAULT_GEMINI_MODEL);
+  keyInput.value = state.geminiApiKey;
+  populateGeminiModelSelect([], state.geminiModel); // 先用預設模型頂著，等讀清單成功後再替換
+
+  saveBtn.addEventListener("click", () => saveGeminiKeyAndLoadModels());
+  keyInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      saveGeminiKeyAndLoadModels();
+    }
+  });
+  modelSelect.addEventListener("change", () => {
+    state.geminiModel = modelSelect.value;
+    saveToLocalStorage(GEMINI_MODEL_STORAGE_KEY, state.geminiModel);
+  });
+
+  // 如果之前已經存過金鑰，一開始就自動讀取一次模型清單，不用使用者再按一次
+  if (state.geminiApiKey) {
+    saveGeminiKeyAndLoadModels({ silent: true });
+  }
+}
+
+function populateGeminiModelSelect(models, selected) {
+  const modelSelect = $("#geminiModelSelect");
+  const modelWrap = $("#geminiModelWrap");
+  if (!modelSelect) return;
+  modelSelect.innerHTML = "";
+
+  const list = models && models.length ? models : [{ id: selected || DEFAULT_GEMINI_MODEL, displayName: selected || DEFAULT_GEMINI_MODEL }];
+  list.forEach((m) => {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.displayName || m.id;
+    modelSelect.appendChild(opt);
+  });
+
+  const want = selected || DEFAULT_GEMINI_MODEL;
+  if (list.some((m) => m.id === want)) {
+    modelSelect.value = want;
+  } else {
+    modelSelect.value = list[0].id;
+  }
+  state.geminiModel = modelSelect.value;
+  if (modelWrap) modelWrap.classList.toggle("hidden", !(models && models.length));
+}
+
+async function saveGeminiKeyAndLoadModels(opts) {
+  const silent = opts && opts.silent;
+  const keyInput = $("#geminiApiKeyInput");
+  const keyHint = $("#geminiKeyHint");
+  const saveBtn = $("#btnSaveGeminiKey");
+  if (!keyInput) return;
+
+  const apiKey = keyInput.value.trim();
+  state.geminiApiKey = apiKey;
+  saveToLocalStorage(GEMINI_KEY_STORAGE_KEY, apiKey);
+
+  if (!apiKey) {
+    populateGeminiModelSelect([], DEFAULT_GEMINI_MODEL);
+    if (keyHint) keyHint.textContent = "金鑰只會存在你自己的瀏覽器裡，不會分享給任何第三方，去背時才會連同這次請求送到你部署的後端再轉給 Google。";
+    return;
+  }
+
+  if (saveBtn) saveBtn.disabled = true;
+  if (keyHint) keyHint.textContent = "正在讀取可用的模型清單…";
+
+  try {
+    const res = await fetch("/api/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error((data && data.error) || `HTTP ${res.status}`);
+    }
+    const models = (data && data.models) || [];
+    if (!models.length) {
+      throw new Error("這組金鑰沒有找到可用的模型，請確認金鑰正確。");
+    }
+    populateGeminiModelSelect(models, state.geminiModel || DEFAULT_GEMINI_MODEL);
+    saveToLocalStorage(GEMINI_MODEL_STORAGE_KEY, state.geminiModel);
+    state.geminiModelsLoaded = true;
+    if (keyHint) keyHint.textContent = `已儲存金鑰，共讀到 ${models.length} 個可用模型，請在下面選擇要使用的模型。`;
+  } catch (err) {
+    populateGeminiModelSelect([], state.geminiModel || DEFAULT_GEMINI_MODEL);
+    if (keyHint) {
+      keyHint.textContent = silent
+        ? "金鑰已還原，但目前讀取模型清單失敗，請確認網路連線或金鑰是否正確：" + (err && err.message ? err.message : String(err))
+        : "讀取模型清單失敗：" + (err && err.message ? err.message : String(err));
+    }
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 
 // 依序嘗試多個 CDN 來源，任何一個能載入即可（增加離線/網路狀況不佳時的成功率）
@@ -356,6 +491,8 @@ async function runGeminiSegmentation(srcCanvas) {
   const blob = await canvasToBlob(srcCanvas, "image/jpeg", 0.92);
   const form = new FormData();
   form.append("image", blob, "photo.jpg");
+  if (state.geminiApiKey) form.append("apiKey", state.geminiApiKey);
+  if (state.geminiModel) form.append("model", state.geminiModel);
 
   let res;
   try {
