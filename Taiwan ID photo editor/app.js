@@ -7,22 +7,30 @@
 const DPI = 300; // 輸出解析度
 const mm2px = (mm) => Math.round((mm / 25.4) * DPI);
 
+// 尺寸與頭長規格依據台灣官方公告（內政部戶政司國民身分證相片規格 / 外交部領事事務局晶片護照相片規格）。
+// headMin/headMax（mm）＝「頭頂至下顎」官方規定範圍，用於畫面上的虛線對齊參考框；
+// 沒有標示 headMin/headMax 的尺寸表示查無官方頭長規定，對齊框僅供構圖參考、非法規要求。
 const SIZE_PRESETS = [
-  { label: "一寸 (25×35mm)", w: 25, h: 35 },
-  { label: "小一寸 (22×32mm)", w: 22, h: 32 },
-  { label: "大一寸 (33×48mm)", w: 33, h: 48 },
-  { label: "二寸 (35×49mm)", w: 35, h: 49 },
-  { label: "小二寸 (35×45mm)", w: 35, h: 45 },
-  { label: "大二寸 (35×53mm)", w: 35, h: 53 },
-  { label: "護照照片 (33×48mm)", w: 33, h: 48 },
-  { label: "美國簽證 (51×51mm)", w: 51, h: 51 },
+  {
+    label: "身分證 / 護照 / 台胞證（2吋大頭照 3.5×4.5cm）",
+    w: 35,
+    h: 45,
+    headMin: 32,
+    headMax: 36,
+    officialWhiteBg: true,
+  },
+  { label: "健保卡 / 國際駕照 / 學生證（2吋半身照 4.2×4.7cm）", w: 42, h: 47 },
+  { label: "一般1吋照片（國內駕照 / 身心障礙手冊 2.8×3.5cm）", w: 28, h: 35 },
+  { label: "美國簽證（5×5cm）", w: 50, h: 50, headMin: 25, headMax: 35 },
+  { label: "日本簽證（3×4cm）", w: 30, h: 40 },
+  { label: "日本打工度假簽證（4.5×3cm）", w: 45, h: 30 },
   { label: "自訂尺寸…", w: null, h: null, custom: true },
 ];
 
 const PAPER_PRESETS = [
-  { label: "5 寸相紙 (127×89mm)", w: 127, h: 89 },
-  { label: "6 寸相紙 (152×102mm)", w: 152, h: 102 },
-  { label: "A4 紙 (210×297mm)", w: 210, h: 297 },
+  { label: "4×6吋相紙 152×102mm（超商沖印最常見規格）", w: 152, h: 102 },
+  { label: "5 寸相紙 127×89mm", w: 127, h: 89 },
+  { label: "A4 紙 210×297mm", w: 210, h: 297 },
   { label: "自訂尺寸…", w: null, h: null, custom: true },
 ];
 
@@ -46,7 +54,8 @@ const state = {
   selectedColor: BG_COLORS[0].value,
   selectedSize: SIZE_PRESETS[0],
   quality: "fast",
-  crop: { offsetX: 0, offsetY: 0, scale: 1 }, // 相對於 processedCanvas 的裁切狀態
+  engine: "local", // "local"（瀏覽器內WASM模型，免費）或 "gemini"（呼叫 /api/segment，需自行部署+API金鑰）
+  crop": { offsetX: 0, offsetY: 0, scale: 1 }, // 相對於 processedCanvas 的裁切狀態
   adjust: { brightness: 0, contrast: 0, smooth: 0 },
   finalCanvas: null, // 最終單張證件照 canvas（已套用裁切+修圖，尺寸=目標mm@300dpi）
   selectedPaper: PAPER_PRESETS[0],
@@ -245,6 +254,7 @@ function initSizeAndColor() {
     const preset = SIZE_PRESETS[Number(sel.value)];
     state.selectedSize = preset;
     $("#customSizeWrap").classList.toggle("hidden", !preset.custom);
+    updateSizeSpecHint();
   });
 
   $("#customW").addEventListener("input", updateCustomSize);
@@ -253,7 +263,10 @@ function initSizeAndColor() {
     const w = Number($("#customW").value) || 0;
     const h = Number($("#customH").value) || 0;
     state.selectedSize = { label: "自訂", w, h, custom: true };
+    updateSizeSpecHint();
   }
+
+  updateSizeSpecHint();
 
   const swatchWrap = $("#colorSwatches");
   BG_COLORS.forEach((c, i) => {
@@ -286,7 +299,26 @@ function initSizeAndColor() {
     })
   );
 
+  $$('input[name="engine"]').forEach((r) =>
+    r.addEventListener("change", (e) => {
+      state.engine = e.target.value;
+      updateEngineHint();
+    })
+  );
+  updateEngineHint();
+
   $("#btnProcess").addEventListener("click", runBackgroundRemoval);
+}
+
+function updateEngineHint() {
+  const hint = $("#engineHint");
+  const localWrap = $("#localQualityWrap");
+  if (!hint) return;
+  const isGemini = state.engine === "gemini";
+  localWrap.classList.toggle("hidden", isGemini);
+  hint.textContent = isGemini
+    ? "會呼叫你自己部署的 /api/segment（Cloudflare Pages Function），只用 Gemini 產生去背「遮罩」，實際照片像素完全來自你的原圖、不經 AI 重繪，臉部不會被改動。需要先部署 functions/api/segment.js 並在後台設定 GEMINI_API_KEY，詳見 README。"
+    : "完全在你的手機/電腦瀏覽器內處理，不需要任何設定，免費、離線可用。";
 }
 
 // 依序嘗試多個 CDN 來源，任何一個能載入即可（增加離線/網路狀況不佳時的成功率）
@@ -318,24 +350,116 @@ async function loadBgRemovalModule() {
   return bgRemovalModulePromise;
 }
 
+// ---------- Gemini API 去背（呼叫自架的 /api/segment，只取「遮罩」，像素完全來自原圖） ----------
+
+async function runGeminiSegmentation(srcCanvas) {
+  const blob = await canvasToBlob(srcCanvas, "image/jpeg", 0.92);
+  const form = new FormData();
+  form.append("image", blob, "photo.jpg");
+
+  let res;
+  try {
+    res = await fetch("/api/segment", { method: "POST", body: form });
+  } catch (err) {
+    throw new Error(
+      "無法連線到 /api/segment，請確認已經把 functions/api/segment.js 跟著網站一起部署到 Cloudflare Pages。"
+    );
+  }
+  if (!res.ok) {
+    const contentType = res.headers.get("content-type") || "";
+    let msg = "";
+    if (contentType.includes("application/json")) {
+      try {
+        msg = (await res.json()).error || "";
+      } catch (_) {
+        msg = "";
+      }
+    }
+    if (!msg) {
+      // 非 JSON 回應（例如 404/501 或其他錯誤頁）通常代表這個環境根本沒有 /api/segment 這個後端函式
+      throw new Error(
+        `找不到可用的 /api/segment（HTTP ${res.status}）。這通常代表目前的部署環境不支援後端函式（例如純靜態的 GitHub Pages / Netlify Drop，或本機測試伺服器），請改用「本機瀏覽器 AI」，或依 README 部署到 Cloudflare Pages 並設定 GEMINI_API_KEY。`
+      );
+    }
+    throw new Error(`Gemini 去背服務錯誤（HTTP ${res.status}）：${msg}`);
+  }
+  const data = await res.json();
+  if (!data || !data.box_2d || !data.mask) {
+    throw new Error("Gemini 沒有辨識出人像遮罩，請換一張正面、背景單純、光線充足的照片再試一次。");
+  }
+  return buildCutoutFromMask(srcCanvas, data.box_2d, data.mask);
+}
+
+// 用 Gemini 回傳的分割遮罩，去裁切「原始未經修改」的像素：
+// 只有透明度（要保留/去除哪些區域）來自 AI，顏色/五官等實際像素值 100% 來自使用者原圖，
+// 不會有任何 AI 重繪，因此臉部絕對不會被改動。
+async function buildCutoutFromMask(srcCanvas, box_2d, maskDataUrl) {
+  const W = srcCanvas.width;
+  const H = srcCanvas.height;
+  const maskImg = await loadImage(maskDataUrl);
+
+  const [y0n, x0n, y1n, x1n] = box_2d;
+  const x0 = clamp(Math.round((x0n / 1000) * W), 0, W);
+  const y0 = clamp(Math.round((y0n / 1000) * H), 0, H);
+  const x1 = clamp(Math.round((x1n / 1000) * W), 0, W);
+  const y1 = clamp(Math.round((y1n / 1000) * H), 0, H);
+  const boxW = Math.max(1, x1 - x0);
+  const boxH = Math.max(1, y1 - y0);
+
+  const maskFull = document.createElement("canvas");
+  maskFull.width = W;
+  maskFull.height = H;
+  const mctx = maskFull.getContext("2d");
+  mctx.drawImage(maskImg, x0, y0, boxW, boxH);
+
+  // Gemini 回傳的遮罩是灰階圖，灰階亮度＝該像素的保留程度，這裡把亮度轉成 alpha 透明度
+  const imgData = mctx.getImageData(0, 0, W, H);
+  const d = imgData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i + 3] = d[i]; // alpha = R 通道亮度
+  }
+  mctx.putImageData(imgData, 0, 0);
+
+  const cutout = document.createElement("canvas");
+  cutout.width = W;
+  cutout.height = H;
+  const cctx = cutout.getContext("2d");
+  cctx.drawImage(srcCanvas, 0, 0); // 完整保留原圖像素，未經任何 AI 重繪
+  cctx.globalCompositeOperation = "destination-in";
+  cctx.drawImage(maskFull, 0, 0);
+  cctx.globalCompositeOperation = "source-over";
+  return cutout;
+}
+
 async function runBackgroundRemoval() {
   if (!state.sourceCanvas) return;
   $("#processHint").textContent = "";
-  showOverlay("正在下載並執行 AI 去背模型，第一次使用可能需要 10~30 秒…");
+  showOverlay(
+    state.engine === "gemini"
+      ? "正在呼叫 Gemini 產生去背遮罩，請稍候…"
+      : "正在下載並執行 AI 去背模型，第一次使用可能需要 10~30 秒…"
+  );
   try {
-    const mod = await loadBgRemovalModule();
-    const removeBackground = mod.default || mod.removeBackground;
+    let cutoutCanvas;
 
-    const srcBlob = await canvasToBlob(state.sourceCanvas, "image/png");
-
-    const cutoutBlob = await removeBackground(srcBlob, {
-      model: state.quality === "fast" ? "isnet_quant8" : "isnet_fp16",
-      output: { format: "image/png", quality: 1, type: "foreground" },
-    });
-
-    const cutoutUrl = URL.createObjectURL(cutoutBlob);
-    const cutoutImg = await loadImage(cutoutUrl);
-    URL.revokeObjectURL(cutoutUrl);
+    if (state.engine === "gemini") {
+      cutoutCanvas = await runGeminiSegmentation(state.sourceCanvas);
+    } else {
+      const mod = await loadBgRemovalModule();
+      const removeBackground = mod.default || mod.removeBackground;
+      const srcBlob = await canvasToBlob(state.sourceCanvas, "image/png");
+      const cutoutBlob = await removeBackground(srcBlob, {
+        model: state.quality === "fast" ? "isnet_quant8" : "isnet_fp16",
+        output: { format: "image/png", quality: 1, type: "foreground" },
+      });
+      const cutoutUrl = URL.createObjectURL(cutoutBlob);
+      const cutoutImg = await loadImage(cutoutUrl);
+      URL.revokeObjectURL(cutoutUrl);
+      cutoutCanvas = document.createElement("canvas");
+      cutoutCanvas.width = state.sourceCanvas.width;
+      cutoutCanvas.height = state.sourceCanvas.height;
+      cutoutCanvas.getContext("2d").drawImage(cutoutImg, 0, 0, cutoutCanvas.width, cutoutCanvas.height);
+    }
 
     const canvas = document.createElement("canvas");
     canvas.width = state.sourceCanvas.width;
@@ -343,7 +467,7 @@ async function runBackgroundRemoval() {
     const ctx = canvas.getContext("2d");
     ctx.fillStyle = state.selectedColor;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(cutoutImg, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(cutoutCanvas, 0, 0);
 
     state.processedCanvas = canvas;
     resetCropState();
@@ -533,8 +657,104 @@ function renderCrop() {
   ctx.lineWidth = 2;
   ctx.strokeRect(frameX, frameY, frameW, frameH);
 
+  // 畫出頭部對齊虛線參考框（僅為畫面上的對齊輔助，不會被存進最終輸出圖片）
+  drawFaceGuide(ctx, frameX, frameY, frameW, frameH);
+
   // 存下這次算好的框資訊，供輸出使用
   renderCrop._lastFrame = { frameX, frameY, frameW, frameH, centerX, centerY, drawW, drawH, scale };
+}
+
+// 取得目前尺寸的官方頭長規定（mm），查無官方規定時回傳估算值僅供參考
+function getHeadGuideMm() {
+  const s = state.selectedSize;
+  if (s.headMin && s.headMax) {
+    return { min: s.headMin, max: s.headMax, official: true };
+  }
+  const Hmm = s.h || 45;
+  const est = Hmm * 0.7;
+  return { min: est * 0.94, max: est * 1.06, official: false };
+}
+
+// 在裁切預覽上畫出白色虛線頭部對齊參考框：
+// - 一條「頭頂」線
+// - 兩條「下巴」允許範圍線（官方規定的頭長上下限各對應一條）
+// - 一個橢圓形臉部輪廓參考
+function drawFaceGuide(ctx, frameX, frameY, frameW, frameH) {
+  const s = state.selectedSize;
+  const Hmm = s.h || 45;
+  const pxPerMm = frameH / Hmm;
+  const guide = getHeadGuideMm();
+  const headMidMm = (guide.min + guide.max) / 2;
+  const remainMm = Math.max(0, Hmm - headMidMm);
+  const topMarginMm = remainMm * 0.4; // 頭頂到相框上緣的留白比例（常見排版慣例）
+
+  const crownMm = topMarginMm;
+  const chinMinMm = topMarginMm + guide.min;
+  const chinMaxMm = topMarginMm + guide.max;
+  const chinMidMm = topMarginMm + headMidMm;
+
+  const crownY = frameY + crownMm * pxPerMm;
+  const chinMinY = frameY + chinMinMm * pxPerMm;
+  const chinMaxY = frameY + chinMaxMm * pxPerMm;
+  const chinMidY = frameY + chinMidMm * pxPerMm;
+
+  const centerX = frameX + frameW / 2;
+  const ovalHeight = chinMidY - crownY;
+  const ovalWidth = ovalHeight * 0.74; // 臉部寬高比例約估
+
+  ctx.save();
+  ctx.strokeStyle = guide.official ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.65)";
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 4]);
+
+  // 臉部橢圓參考
+  ctx.beginPath();
+  ctx.ellipse(centerX, (crownY + chinMidY) / 2, ovalWidth / 2, ovalHeight / 2, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // 頭頂對齊線
+  ctx.beginPath();
+  ctx.moveTo(frameX + 4, crownY);
+  ctx.lineTo(frameX + frameW - 4, crownY);
+  ctx.stroke();
+
+  // 下巴允許範圍（官方頭長下限～上限）
+  ctx.beginPath();
+  ctx.moveTo(frameX + 4, chinMinY);
+  ctx.lineTo(frameX + frameW - 4, chinMinY);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(frameX + 4, chinMaxY);
+  ctx.lineTo(frameX + frameW - 4, chinMaxY);
+  ctx.stroke();
+
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  ctx.font = "9px sans-serif";
+  ctx.textBaseline = "bottom";
+  ctx.fillText("頭頂", frameX + 4, crownY - 3);
+  ctx.textBaseline = "top";
+  ctx.fillText("下巴範圍", frameX + 4, chinMaxY + 3);
+  ctx.restore();
+}
+
+function updateSizeSpecHint() {
+  const s = state.selectedSize;
+  const el = $("#sizeSpecHint");
+  const colorHintEl = $("#colorHint");
+  if (!el) return;
+  if (s.headMin && s.headMax) {
+    el.textContent = `台灣官方規定：頭頂至下顎需 ${(s.headMin / 10).toFixed(1)}〜${(s.headMax / 10).toFixed(
+      1
+    )}cm，臉部占照片面積 70%〜80%。`;
+  } else if (s.custom) {
+    el.textContent = "自訂尺寸，虛線對齊框為一般估算值，非官方規定。";
+  } else {
+    el.textContent = "此尺寸查無官方頭長規定，虛線對齊框僅供構圖參考。";
+  }
+  if (colorHintEl) {
+    colorHintEl.textContent = s.officialWhiteBg ? "此規格依規定須使用白色背景。" : "";
+  }
 }
 
 function confirmCropAndProceed() {
