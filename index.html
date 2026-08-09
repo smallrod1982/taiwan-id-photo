@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>證件照製作 - 拍照 / 去背 / 排版</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header class="app-header">
+  <h1>證件照製作</h1>
+  <p class="subtitle">拍照或上傳 → 自動去背換底色 → 裁切修圖 → 排版沖印</p>
+</header>
+
+<div class="steps-bar" id="stepsBar">
+  <div class="step-dot active" data-step="1">1<span>取得照片</span></div>
+  <div class="step-dot" data-step="2">2<span>規格底色</span></div>
+  <div class="step-dot" data-step="3">3<span>裁切修圖</span></div>
+  <div class="step-dot" data-step="4">4<span>排版輸出</span></div>
+</div>
+
+<main>
+
+  <!-- STEP 1: 取得照片 -->
+  <section class="panel" id="panel-1">
+    <div class="card">
+      <h2>第一步：取得照片</h2>
+      <div class="tabbar">
+        <button class="tab-btn active" data-tab="camera">相機拍照</button>
+        <button class="tab-btn" data-tab="upload">從相簿上傳</button>
+      </div>
+
+      <div class="tab-content" id="tab-camera">
+        <div class="camera-wrap">
+          <video id="video" autoplay playsinline muted></video>
+          <div class="face-guide"></div>
+        </div>
+        <p class="hint" id="cameraHint">請允許瀏覽器使用相機權限。手機請直向拍攝，正面面對鏡頭。</p>
+        <div class="btn-row">
+          <button id="btnSwitchCam" class="btn secondary" hidden>切換前後鏡頭</button>
+          <button id="btnCapture" class="btn primary">📷 拍照</button>
+        </div>
+      </div>
+
+      <div class="tab-content hidden" id="tab-upload">
+        <label class="upload-box" for="fileInput">
+          <span>點擊選擇照片，或拖曳照片到這裡</span>
+          <input type="file" id="fileInput" accept="image/*" hidden />
+        </label>
+      </div>
+    </div>
+  </section>
+
+  <!-- STEP 2: 規格與底色，並執行去背 -->
+  <section class="panel hidden" id="panel-2">
+    <div class="card">
+      <h2>第二步：選擇規格與底色</h2>
+      <div class="grid-2">
+        <div>
+          <label class="field-label">照片原圖</label>
+          <canvas id="sourcePreview" class="preview-canvas"></canvas>
+          <button id="btnRetake" class="btn text">重新拍攝 / 更換照片</button>
+        </div>
+        <div class="controls">
+          <label class="field-label">證件照尺寸</label>
+          <select id="sizePreset" class="select"></select>
+          <div class="custom-size hidden" id="customSizeWrap">
+            <input type="number" id="customW" placeholder="寬 mm" min="10" max="200" />
+            <span>×</span>
+            <input type="number" id="customH" placeholder="高 mm" min="10" max="200" />
+          </div>
+          <p class="hint" id="sizeSpecHint"></p>
+
+          <label class="field-label">底色</label>
+          <div class="color-swatches" id="colorSwatches"></div>
+          <p class="hint" id="colorHint"></p>
+
+          <label class="field-label">去背引擎</label>
+          <div class="radio-row">
+            <label><input type="radio" name="engine" value="local" checked /> 本機瀏覽器 AI（免費）</label>
+            <label><input type="radio" name="engine" value="gemini" /> Gemini API（更精準，需自行部署）</label>
+          </div>
+          <p class="hint" id="engineHint"></p>
+
+          <div id="localQualityWrap">
+            <label class="field-label">去背模式</label>
+            <div class="radio-row">
+              <label><input type="radio" name="quality" value="fast" checked /> 快速（手機建議）</label>
+              <label><input type="radio" name="quality" value="high" /> 高品質（較慢）</label>
+            </div>
+          </div>
+
+          <button id="btnProcess" class="btn primary wide">✂️ 自動去背並套用底色</button>
+          <p class="hint" id="processHint"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STEP 3: 裁切修圖 -->
+  <section class="panel hidden" id="panel-3">
+    <div class="card">
+      <h2>第三步：裁切與修圖</h2>
+      <div class="grid-2">
+        <div>
+          <label class="field-label">拖曳移動、滾輪/雙指縮放來調整構圖</label>
+          <div class="crop-wrap" id="cropWrap">
+            <canvas id="cropCanvas"></canvas>
+          </div>
+          <p class="hint" id="cropGuideHint">白色虛線＝頭部對齊參考框，讓頭頂、下巴對準虛線範圍即可。</p>
+        </div>
+        <div class="controls">
+          <label class="field-label">縮放</label>
+          <input type="range" id="zoomRange" min="50" max="300" value="100" />
+
+          <label class="field-label">亮度</label>
+          <input type="range" id="brightRange" min="-50" max="50" value="0" />
+
+          <label class="field-label">對比</label>
+          <input type="range" id="contrastRange" min="-50" max="50" value="0" />
+
+          <label class="field-label">磨皮美膚</label>
+          <input type="range" id="smoothRange" min="0" max="100" value="0" />
+
+          <button id="btnResetAdjust" class="btn text">還原調整</button>
+          <button id="btnConfirmCrop" class="btn primary wide">✅ 完成，下一步排版</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STEP 4: 排版輸出 -->
+  <section class="panel hidden" id="panel-4">
+    <div class="card">
+      <h2>第四步：排版沖印</h2>
+      <div class="grid-2">
+        <div>
+          <label class="field-label">單張證件照成果</label>
+          <canvas id="finalSingle" class="preview-canvas small"></canvas>
+          <button id="btnDownloadSingle" class="btn secondary wide">下載單張證件照</button>
+        </div>
+        <div class="controls">
+          <label class="field-label">相紙尺寸</label>
+          <select id="paperPreset" class="select"></select>
+          <div class="custom-size hidden" id="customPaperWrap">
+            <input type="number" id="customPaperW" placeholder="寬 mm" min="50" max="500" />
+            <span>×</span>
+            <input type="number" id="customPaperH" placeholder="高 mm" min="50" max="500" />
+          </div>
+
+          <label class="field-label">照片間距 (mm)</label>
+          <input type="range" id="gapRange" min="0" max="5" value="1" step="0.5" />
+
+          <label class="field-label"><input type="checkbox" id="cutLinesCheck" checked /> 顯示裁切線</label>
+
+          <button id="btnLayout" class="btn primary wide">🖨️ 產生排版滿版相紙</button>
+          <p class="hint" id="layoutHint"></p>
+        </div>
+      </div>
+      <div class="layout-preview-wrap">
+        <canvas id="layoutCanvas" class="preview-canvas layout"></canvas>
+      </div>
+      <button id="btnDownloadLayout" class="btn primary wide" hidden>⬇️ 下載排版相紙（可直接送洗）</button>
+      <button id="btnStartOver" class="btn text wide">重新開始</button>
+    </div>
+  </section>
+
+</main>
+
+<div class="overlay hidden" id="loadingOverlay">
+  <div class="spinner"></div>
+  <p id="loadingText">處理中，第一次使用需下載 AI 模型，請稍候…</p>
+</div>
+
+<footer>
+  <p>此工具完全在你的瀏覽器內處理，照片不會上傳到任何伺服器。</p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
